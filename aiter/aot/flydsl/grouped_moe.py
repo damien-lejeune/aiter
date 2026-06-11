@@ -20,6 +20,31 @@ _WARP_TILE_N = 64
 _TILE_K = 256
 
 
+def _preshuffled_scale_shape(
+    rows: int, k_dim: int, warp_tile: int, tile_k: int = _TILE_K
+) -> tuple[int, int]:
+    """Mirror moe_grouped_gemm_mxscale_gfx1250._preshuffled_scale_shape.
+
+    The grouped GEMM launchers validate an exact preshuffled E8M0 scale layout
+    (see tests.kernels.test_gemm_mxscale_gfx1250.preshuffle_e8m0_scale), so the
+    AOT dummy tensors must use the same shape, not the plain (rows, k//32) one.
+    """
+    k_scale = int(k_dim) // 32
+    scale_k_per_tile = int(tile_k) // 32
+    if k_scale % scale_k_per_tile != 0:
+        raise ValueError(
+            f"K scale columns must be divisible by tile_k/32, got {k_scale} and {scale_k_per_tile}"
+        )
+    wmma_rep = int(warp_tile) // 16
+    if wmma_rep < 1:
+        raise ValueError(f"warp_tile must be >= 16, got {warp_tile}")
+    if int(rows) % wmma_rep != 0:
+        raise ValueError(
+            f"scale rows must be divisible by wmma_rep={wmma_rep}, got {rows}"
+        )
+    return int(rows) // wmma_rep, k_scale * wmma_rep
+
+
 def _as_bool(value, default: bool = False) -> bool:
     if value is None or str(value).strip() == "":
         return default
@@ -38,6 +63,13 @@ def parse_csv(csv_path: str):
     with open(csv_path, newline="") as f:
         for row in csv.DictReader(f):
             if not row:
+                continue
+            # Skip blank/incomplete rows (e.g. a trailing whitespace line),
+            # where required columns come back empty or None.
+            if any(
+                row.get(col) is None or str(row.get(col)).strip() == ""
+                for col in ("model_dim", "inter_dim", "expert", "token")
+            ):
                 continue
             n_warp = int(row.get("n_warp") or 4)
             job = {
@@ -99,6 +131,8 @@ def compile_one_config(**job):
         if job["data_format"] == "fp4"
         else compile_moe_grouped_gemm2_a8w4_masked
     )
+    warp_tile_m = job["tile_m"] // job["m_warp"]
+    warp_tile_n = job["tile_n"] // job["n_warp"]
     common = dict(
         model_dim=job["model_dim"],
         inter_dim=job["inter_dim"],
@@ -126,10 +160,15 @@ def compile_one_config(**job):
         (job["experts"], 2 * job["inter_dim"], job["model_dim"] // 2), dtype=torch.uint8
     )
     sx1 = torch.empty(
-        (job["experts"], job["max_m"], job["model_dim"] // 32), dtype=torch.uint8
+        (job["experts"], *_preshuffled_scale_shape(
+            job["max_m"], job["model_dim"], warp_tile_m
+        )),
+        dtype=torch.uint8,
     )
     sw1 = torch.empty(
-        (job["experts"], 2 * job["inter_dim"], job["model_dim"] // 32),
+        (job["experts"], *_preshuffled_scale_shape(
+            2 * job["inter_dim"], job["model_dim"], warp_tile_n
+        )),
         dtype=torch.uint8,
     )
     y2 = torch.empty((job["experts"], job["max_m"], job["model_dim"]), dtype=dtype)
@@ -140,10 +179,16 @@ def compile_one_config(**job):
         (job["experts"], job["model_dim"], job["inter_dim"] // 2), dtype=torch.uint8
     )
     sx2 = torch.empty(
-        (job["experts"], job["max_m"], job["inter_dim"] // 32), dtype=torch.uint8
+        (job["experts"], *_preshuffled_scale_shape(
+            job["max_m"], job["inter_dim"], warp_tile_m
+        )),
+        dtype=torch.uint8,
     )
     sw2 = torch.empty(
-        (job["experts"], job["model_dim"], job["inter_dim"] // 32), dtype=torch.uint8
+        (job["experts"], *_preshuffled_scale_shape(
+            job["model_dim"], job["inter_dim"], warp_tile_n
+        )),
+        dtype=torch.uint8,
     )
     with compile_only_env():
         exe1 = compiler1(

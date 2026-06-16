@@ -241,7 +241,7 @@ using {k.name}_Traits = {traits_name}<{k.BLOCK_SIZE},
             dim3 block_rowblock({block_size});
             splitk_reduce_kernel_exact_n_rowblock<{sk}, {nvec}, {rows}, {vec}, {workspace_ptr_type}, __bf16, {{hb}}, __bf16>
                 <<<grid_rowblock, block_rowblock, 0, stream>>>(
-                    ws_handle_,
+                    ws_handle_device_,
                     reinterpret_cast<__bf16*>(Y.data_ptr()),
                     M, N, batch, padded_M, padded_N,
                     {{bias_arg}});
@@ -267,7 +267,7 @@ using {k.name}_Traits = {traits_name}<{k.BLOCK_SIZE},
         return (
             f"{indent}{reduce_kernel}<REDUCE_VEC, REDUCE_BS, {dtype}, {hb}, {dtype}, true>\n"
             f"{indent}    <<<grid_reduce, block_reduce, 0, stream>>>(\n"
-            f"{indent}        ws_handle_,\n"
+            f"{indent}        ws_handle_device_,\n"
             f"{indent}        reinterpret_cast<{dtype}*>(Y.data_ptr()),\n"
             f"{indent}        split_k, M, N, batch, padded_M, padded_N,"
             f"{bias_args}"
@@ -462,6 +462,8 @@ void
     HIP_CALL(hipStreamIsCapturing(stream, &capture_status));
     const bool capturing = (capture_status != hipStreamCaptureStatusNone);
     extern opus_splitk_ws_handle* opus_splitk_ws_get(hipStream_t, bool);
+    extern const opus_splitk_ws_handle* opus_splitk_ws_device_handle(hipStream_t, bool);
+    extern void opus_splitk_ws_sync_to_device(hipStream_t);
     auto* ws_handle_ = opus_splitk_ws_get(stream, /*allow_create=*/!capturing);
 
     size_t ws_bytes = (size_t)split_k * (size_t)batch
@@ -484,12 +486,15 @@ void
     HIP_CALL(hipMalloc(&new_ptr, grow_bytes));
     ws_handle_->ptr = new_ptr;
     ws_handle_->bytes = grow_bytes;
+    opus_splitk_ws_sync_to_device(stream);
     }}
+    const auto* ws_handle_device_ =
+        opus_splitk_ws_device_handle(stream, /*allow_create=*/!capturing);
 
     {kargs_name} kargs{{{{}}}};
     kargs.ptr_a         = XQ.data_ptr();
     kargs.ptr_b         = WQ.data_ptr();
-    kargs.ws_handle     = ws_handle_;
+    kargs.ws_handle     = ws_handle_device_;
     kargs.ptr_c         = Y.data_ptr();
     kargs.ptr_bias      = ptr_bias_;
     kargs.m = M; kargs.n = N; kargs.k = K; kargs.batch = batch;

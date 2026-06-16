@@ -279,11 +279,8 @@ __global__ void splitk_reduce_kernel_exact_n_rowblock(
     auto g_ws = opus::make_gmem(workspace,
                                 (unsigned int)(split_stride * SPLIT_K * sizeof(D_WS)));
 
-    opus::vector_t<float, VEC> acc;
-    #pragma unroll
-    for (int t = 0; t < VEC; ++t) acc[t] = 0.0f;
-
-    // Direct accumulation keeps the fixed split order without staging partials.
+    // Issue all SPLIT_K loads up front, matching the legacy v3 schedule.
+    opus::vector_t<float, VEC> partial[SPLIT_K];
     #pragma unroll
     for (int s = 0; s < SPLIT_K; ++s) {
         int ws_idx = ws_row_base + (int)(s * split_stride);
@@ -293,7 +290,7 @@ __global__ void splitk_reduce_kernel_exact_n_rowblock(
                 auto v8 = g_ws.template load<8>(ws_idx + g * 8);
                 #pragma unroll
                 for (int j = 0; j < 8; ++j) {
-                    acc[g * 8 + j] += static_cast<float>(v8[j]);
+                    partial[s][g * 8 + j] = static_cast<float>(v8[j]);
                 }
             }
         } else {
@@ -304,10 +301,19 @@ __global__ void splitk_reduce_kernel_exact_n_rowblock(
                 auto v4 = g_ws.template load<4>(ws_idx + g * 4);
                 #pragma unroll
                 for (int j = 0; j < 4; ++j) {
-                    acc[g * 4 + j] += static_cast<float>(v4[j]);
+                    partial[s][g * 4 + j] = static_cast<float>(v4[j]);
                 }
             }
         }
+    }
+
+    opus::vector_t<float, VEC> acc;
+    #pragma unroll
+    for (int t = 0; t < VEC; ++t) acc[t] = partial[0][t];
+    #pragma unroll
+    for (int s = 1; s < SPLIT_K; ++s) {
+        #pragma unroll
+        for (int t = 0; t < VEC; ++t) acc[t] += partial[s][t];
     }
 
     if constexpr (HAS_BIAS) {

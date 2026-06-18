@@ -155,6 +155,8 @@ jobs:
               python3 -m pip show amd-aiter
               echo "[SKIP] Keeping Triton from the FFM image."
               python3 -m pip show amd-triton triton || true
+              echo "==== Check Aiter core module ===="
+              find aiter/jit -maxdepth 2 -type f -name "*core*.so" -print || true
               python3 -c "import aiter; print(f\"aiter module: {aiter.__file__}\")"
               PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -v "${FFM_TEST}"
             '

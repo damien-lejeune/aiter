@@ -30,7 +30,7 @@ on:
       aiter_ref:
         description: Aiter git ref to clone inside the FFM image.
         required: true
-        default: main
+        default: shared/reduced_tests_for_FFM_CI
         type: string
 
 permissions:
@@ -43,7 +43,7 @@ concurrency:
 env:
   FFM_IMAGE: ${{ inputs.docker_image || 'rocm/ffm-dev:latest' }}
   FFM_TEST_SOURCE_REF: ${{ inputs.test_ref || 'shared/reduced_tests_for_FFM_CI' }}
-  FFM_AITER_REF: ${{ inputs.aiter_ref || github.event.pull_request.head.sha || github.sha }}
+  FFM_AITER_REF: ${{ inputs.aiter_ref || 'shared/reduced_tests_for_FFM_CI' }}
   FFM_TEST: op_tests/triton_tests
 
 jobs:

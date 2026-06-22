@@ -149,6 +149,20 @@ jobs:
               cd /tmp/ffm-tests
               export ENABLE_CK=0
               python3 -m pip show amd-aiter
+              echo "==== Check FFM image Aiter git version ===="
+              if [ -d /root/aiter/.git ]; then
+                git -C /root/aiter rev-parse HEAD
+                git -C /root/aiter branch --show-current || true
+                git -C /root/aiter log -1 --oneline
+                git -C /root/aiter status --short --branch
+              else
+                echo "/root/aiter is not a git checkout"
+              fi
+              echo "==== Check expected Aiter APIs ===="
+              grep -R "dynamic_nvfp4_quant" -n /root/aiter/aiter/ops/triton/quant || true
+              grep -R "is_2d_gluon_available" -n /root/aiter/aiter/ops/triton/attention || true
+              grep -R "shuffle_weight_gfx1250" -n /root/aiter/aiter/ops || true
+              grep -R "routing_from_hash" -n /root/aiter/aiter/ops/triton/moe || true
               echo "[SKIP] Keeping Triton from the FFM image."
               python3 -m pip show amd-triton triton || true
               echo "==== Check Aiter core module ===="

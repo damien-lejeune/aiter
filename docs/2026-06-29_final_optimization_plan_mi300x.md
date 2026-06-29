@@ -219,7 +219,28 @@ matters **more at D=256** (SPLIT=2 doubles the partials work + the reduce traffi
   (min for the (4,4,2) K-fragment) and audit VGPR temporaries introduced by Phase A.
 - **Gate:** occupancy ↑ **and** partials µs ↓ (occupancy alone is not the goal — it must
   convert to time given the kernel is already 62–77% HBM-BW).
-- [ ] tile/footprint sweep  [ ] re-profile + EXP block.
+- [x] tile/footprint sweep  [x] re-profile + EXP block.
+- **RESULT (EXP-2026-06-29d): GATE FAILED — reverted.** The 128×128→64×64 sweep halves
+  VGPR (224→98) and LDS (32→16 KB) and ~doubles occupancy with **zero** change in partials
+  µs (5462→5465 @ D=256; 19032→19044 @ D=512), and 2×'s HBM re-reads with zero change too.
+  **`grad_dense_partials` is MFMA-pipeline-bound** — occupancy, LDS, and HBM bandwidth are
+  all already hidden behind the matrix-core feed; the only sweep-invariant is the MFMA
+  count. **Reframes Phase A:** a clean A/B (added env-guarded vectorized-J staging) shows
+  load vectorization is **neutral** at every tile (5444→5443 @128², 5476→5449 @64²; end-to-
+  end 5862 vs 5843) — i.e. EXP-29a's "J-only regressed" was a mis-measure; the real Phase-A
+  regressor was the dOut+dBias-fusion rework. **Net: no staging/occupancy lever can speed
+  this kernel; the real target is the MFMA pipeline** (MMA atom 16×16×32 / 32×32×8, the
+  (4,4,2) K-fragment, traversal_order, and more independent accumulator chains to lift the
+  26–28% MFMA util). This supersedes the §5 "do D first to unlock A" idea — A is not
+  unlockable by occupancy.
+- **UPDATE (EXP-2026-06-29e): the 64×64 footprint was SHIPPED anyway** as a deliberate,
+  perf-neutral **register/LDS-headroom** state change (not a time win): `DDENSE_BK=DDENSE_BN
+  =64` drops partials **VGPR 224→98** and **LDS 32→16 KB** (occupancy ~2×) with neutral time
+  across all four D×regime configs (back-to-back bench within ~0.7%; cos 0.999999). Rationale:
+  bank the headroom the MFMA-feed ILP lever needs (128×128's 224 VGPR had none). Watch the
+  extra HBM traffic (J ×N/64, dOut ×K/64) only if a later change turns the kernel
+  memory-bound. (A one-off 16% D=512-skew blip was shared-server contention, gone on
+  back-to-back re-measure.)
 
 ### Phase E — Vectorize the reduce kernels + swizzle polish (matters most at D=256)
 - **Why:** reduces are scalar per-column (`_load_scalar`/`_store_scalar`). At **D=256

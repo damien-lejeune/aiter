@@ -77,23 +77,33 @@ COARSEN_M = 2
 # dDense partials tiling. The contraction dDense[k,n] = sum_m J[m,k]*dOut[m,n] is
 # a transposed GEMM C[k,n] = sum_m A[k,m]*B[n,m] with A = J.T and B = dOut.T, i.e.
 # the reduction axis m is the *contiguous* fragment axis of both operands. Each
-# workgroup (256 threads = 4 waves) owns one (DDENSE_BK x DDENSE_BN) = 128x128
-# output sub-tile of the group's (K, N) block and runs the MFMA 16x16x16 bf16 pipe
-# (same tiled_mma as the forward kernel). The reduction is tiled DDENSE_BM rows of
-# m at a time: each m-tile is staged transposed into LDS (J -> sJ as (k, m), dOut
-# -> sD as (n, m), so m ends up contiguous and feeds the MFMA K-fragment), then a
-# bf16 MFMA accumulates into one fp32 accumulator fragment carried across the whole
-# (dynamic, split-strided) m-tile loop. Output-tiling keeps LDS fixed at 32 KB and
-# the accumulator at one MFMA C-fragment per thread regardless of D = K = N.
+# workgroup (256 threads = 4 waves) owns one (DDENSE_BK x DDENSE_BN) output sub-tile
+# of the group's (K, N) block and runs the MFMA 16x16x16 bf16 pipe (same tiled_mma as
+# the forward kernel). The reduction is tiled DDENSE_BM rows of m at a time: each
+# m-tile is staged transposed into LDS (J -> sJ as (k, m), dOut -> sD as (n, m), so m
+# ends up contiguous and feeds the MFMA K-fragment), then a bf16 MFMA accumulates into
+# one fp32 accumulator fragment carried across the whole (dynamic, split-strided)
+# m-tile loop.
+#
+# Footprint (EXP-2026-06-29d/e): a 64x64 output sub-tile (vs the old 128x128) keeps the
+# kernel time identical (it is MFMA-pipeline-bound, not occupancy/LDS/HBM-bound on this
+# box) while HALVING the per-thread fp32 C-fragment (64 -> 16 elems) and the LDS staging
+# (32 KB -> 16 KB): partials VGPR drops 224 -> 98 and occupancy ~doubles. We bank that
+# register/LDS headroom deliberately -- the next lever (MFMA-feed ILP: more independent
+# accumulator chains / a wider atom) needs that room, which 128x128 (224 VGPR, ~2 WG/CU)
+# did not have. The cost is a larger grid + more operand re-reads (J x N/DDENSE_BN, dOut
+# x K/DDENSE_BK), which is free today (all hidden behind the MFMA pipe) but is the thing
+# to watch if a future change makes the kernel memory-bound again.
 DDENSE_BM = 64    # m-contraction tile staged per step (the MFMA K dimension)
-DDENSE_BK = 128   # output K-tile per workgroup (MFMA M dimension)
-DDENSE_BN = 128   # output N-tile per workgroup (MFMA N dimension)
+DDENSE_BK = 64    # output K-tile per workgroup (MFMA M dimension)
+DDENSE_BN = 64    # output N-tile per workgroup (MFMA N dimension)
 DDENSE_THREADS = 256
 NK_TILES = K // DDENSE_BK  # output K-tiles per group (compile-time)
 NN_TILES = N // DDENSE_BN  # output N-tiles per group (compile-time)
-_J_LDS_LOADS = (DDENSE_BM * DDENSE_BK) // DDENSE_THREADS  # 32
-_D_LDS_LOADS = (DDENSE_BM * DDENSE_BN) // DDENSE_THREADS  # 32
+_J_LDS_LOADS = (DDENSE_BM * DDENSE_BK) // DDENSE_THREADS
+_D_LDS_LOADS = (DDENSE_BM * DDENSE_BN) // DDENSE_THREADS
 _DDENSE_SMEM_BYTES = (DDENSE_BK * DDENSE_BM + DDENSE_BN * DDENSE_BM) * 2  # bf16 staging
+_DDENSE_CFRAG = (DDENSE_BK * DDENSE_BN) // DDENSE_THREADS  # fp32 C-fragment elems / thread
 
 # dBias[b][n] = sum_m dOut[m,n] reduces over the same dynamic m axis as dDense, and
 # the dDense partials kernel already streams every dOut element through LDS, so the
@@ -530,7 +540,7 @@ def grad_dense_partials_kernel(
         mma_frag_C_retile = thr_copy_r2g_C.retile(mma_frag_C_bf16)
         thr_gPart = thr_copy_r2g_C.partition_S(gPart)
         mma_frag_C_bf16.store(
-            fx.arith.trunc_f(fx.T.VectorType.get([64], fx.T.bf16()), mma_frag_C.load())
+            fx.arith.trunc_f(fx.T.VectorType.get([_DDENSE_CFRAG], fx.T.bf16()), mma_frag_C.load())
         )
         fx.copy(fx.make_copy_atom(fx.rocdl.BufferCopy16b(), fx.BFloat16), mma_frag_C_retile, thr_gPart)
     else:

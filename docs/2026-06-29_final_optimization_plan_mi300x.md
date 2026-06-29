@@ -252,7 +252,25 @@ matters **more at D=256** (SPLIT=2 doubles the partials work + the reduce traffi
   (D=256). (2) Retune the `sJ/sD` `SwizzleType.get(3,3,3)` for the transposed
   `(out_dim, m)` store to drive LDS conflicts → 0.
 - **Gate:** reduce µs ↓ (esp. skew), LDS conflicts/access → ~0, no regression.
-- [ ] vectorized reduce (D=256)  [ ] swizzle retune  [ ] re-profile + EXP block.
+- [x] vectorized reduce (D=256)  [~] swizzle retune (skipped, see below)  [x] re-profile.
+- **RESULT (EXP-2026-06-29f): GATE NOT MET — neutral; not shipped.** Vectorized both reduce
+  kernels to a 128-bit (4×fp32) per-thread column strip (`buffer_load vec_width=4` + a
+  64-bit bf16 `buffer_store`, NRED_VEC=4); correct (cos 0.999999, D=256 uniform+skew; D=512
+  unaffected — its reduces were already deleted by Phase C). But it is **time-neutral**: a
+  contention-robust **back-to-back** isolation (same 64×64 tile, differing only in the
+  reduce) gave `grad_dense_reduce` **217.9 µs (scalar) vs 213.8 µs (vectorized)** at D=256
+  uniform — within noise. **Why:** the reduce launches **`NRED_COL_TILES·K·n_groups`
+  blocks (~262 k for D=256)** — one tiny block per (k-row, group) — so it is
+  **block-dispatch-bound**, not thread-work-bound; vectorizing cuts threads/instructions
+  per block but **not the block count**, so the wall doesn't move. The **swizzle retune was
+  skipped**: Phase D (EXP-29d) proved `grad_dense_partials` is MFMA-bound with LDS already
+  hidden, so driving its sJ/sD bank conflicts to 0 cannot change its time. **Reverted**
+  (banks no resource — the reduce uses ~5 VGPR — unlike Phase D's register headroom).
+  **Real reduce lever (next):** cut the *block count* — coarsen the k-dim per block or
+  flatten (K×N) into a per-group 1-D grid so each WG reduces many output elements — not
+  thread-level vectorization. **Measurement caveat:** an undetected co-tenant inflated all
+  *absolute* numbers ~1.6× this session (committed HEAD itself read 9.1 ms vs its 5.8 ms
+  baseline; `rocm-smi -d 6` showed 0%), so only back-to-back ratios are trustworthy here.
 
 ---
 
